@@ -78,6 +78,15 @@ A click always goes to the **nearest** desktop under the pointer, front or back.
 | Cube patcher (shared) | `~/.local/bin/kde-cube-patches-sync` |
 | Update watcher and login check (shared) | `~/.config/systemd/user/kde-cube-patches.path`, `kde-cube-patches-update.service`, `kde-cube-patches-login.service` |
 
+### Disk space and memory
+
+- **Disk space: about 100 KB** (the patched cube copy, the patch, the patcher and the systemd units).
+- **Memory: nothing extra to speak of.** The patched cube uses the same memory as KDE's own cube while it's open, and nothing while it's closed. The update watcher is a file-change notification handled by systemd, and the update and login services exit within seconds.
+
+### Keep `git` installed
+
+The patcher uses `git` to apply the patch. If you remove `git`, the next KDE update can't rebuild the patched cube: back-side clicking is turned off and KDE's own cube is used, with a notification saying the patch couldn't be applied. Reinstall it with `sudo dnf install git`, re-run `./install.sh`, and log out and back in.
+
 ## Turning it off
 
 To switch back to KDE's own cube but keep the tool installed:
