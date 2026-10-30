@@ -1,3 +1,8 @@
+Name: back-side clicking
+
+Cube-Backside-Click: clicking the back of a desktop face in KDE's Desktop Cube switches to that
+desktop. Made against KDE Plasma 6.7.5's Desktop Cube.
+
 --- a/contents/ui/Cube.qml
 +++ b/contents/ui/Cube.qml
 @@ -28,6 +28,36 @@

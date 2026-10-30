@@ -1,0 +1,226 @@
+#!/usr/bin/env bash
+# kde-cube-patches-sync: keep a patched copy of KDE's Desktop Cube as a per-user override in
+# ~/.local/share/kwin/effects/cube, with every patch in ~/.local/share/kde-cube-patches/
+# applied, rebuilt from KDE's cube whenever KDE's cube files or the set of patches change.
+#
+# Shared by the ARM64-Fedora-KDE-QoL projects that patch the cube (3-Finger-Cube-Gesture,
+# Cube-Backside-Click): each one adds its patch and installs this script, so they can be used
+# alone or together. KDE only uses one per-user copy of an effect, so they have to share it.
+#
+#   (no args)           rebuild the patched cube if anything changed
+#   --settle            wait a few seconds first (used when triggered by a file change mid-update)
+#   --setup             install the update watcher and login check (systemd user units), take
+#                       over from Cube-Backside-Click v1.0 if it's installed, then rebuild
+#   --remove-if-unused  if no patches are left: remove the watcher, the patched cube and this
+#                       script (used by the projects' uninstallers)
+#
+# The projects' installers copy this script to ~/.local/bin unless a newer ENGINE_VERSION is
+# already there.
+#
+# A patch that no longer fits KDE's cube (after a KDE update) is skipped, with one notification;
+# the others are still applied. If none fit, the patched copy is removed and KDE's own cube is
+# used. A patch named <name>.patch is skipped while ~/.config/<name>/disabled exists.
+# A cube override that this script didn't create is left alone.
+#
+# Copyright (C) 2026 Cynders
+# SPDX-License-Identifier: GPL-3.0-or-later
+ENGINE_VERSION=1
+set -u
+SRC="${KDE_CUBE_PATCHES_SRC:-/usr/share/kwin/effects/cube}"   # override only for testing
+DATA="${XDG_DATA_HOME:-$HOME/.local/share}"
+CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}"
+DST="$DATA/kwin/effects/cube"
+PATCH_DIR="$DATA/kde-cube-patches"
+STATE="${XDG_STATE_HOME:-$HOME/.local/state}/kde-cube-patches"
+MARKER="$DST/.kde-cube-patches"     # marks an override this script manages (see write_marker)
+OLD_MARKER="$DST/.cube-backside-click"  # from Cube-Backside-Click v1.0, which this replaces
+
+UNIT_DIR="$CONFIG/systemd/user"
+SELF="$HOME/.local/bin/kde-cube-patches-sync"
+
+setup() {
+  mkdir -p "$UNIT_DIR"
+  # Take over from Cube-Backside-Click v1.0, which kept its own patched cube: keep its patch
+  # (Cube-Backside-Click v2.0's installer replaces it with the current one) and remove its watcher.
+  local v1_patch="$DATA/cube-backside-click/cube-backside.patch"
+  if [[ -f "$v1_patch" ]]; then
+    mkdir -p "$PATCH_DIR"
+    if [[ ! -f "$PATCH_DIR/cube-backside-click.patch" ]]; then
+      { echo "Name: back-side clicking"; echo; cat "$v1_patch"; } > "$PATCH_DIR/cube-backside-click.patch"
+    fi
+    systemctl --user disable --now cube-backside-click.path 2>/dev/null || true
+    systemctl --user disable cube-backside-click-login.service 2>/dev/null || true
+    rm -f "$UNIT_DIR/cube-backside-click.path" "$UNIT_DIR/cube-backside-click-update.service" \
+      "$UNIT_DIR/cube-backside-click-login.service" "$HOME/.local/bin/cube-backside-click-sync"
+    rm -rf "$DATA/cube-backside-click" "${XDG_STATE_HOME:-$HOME/.local/state}/cube-backside-click"
+    echo "Moved Cube-Backside-Click v1.0's patch over to the shared cube patcher."
+  fi
+
+  # A user-level systemd path unit notices when Fedora replaces KDE's cube files (an update) and
+  # rebuilds the patched copy; a login service is the backstop. Nothing here runs as root.
+  cat > "$UNIT_DIR/kde-cube-patches.path" <<'EOF'
+# Installed by kde-cube-patches-sync (3-Finger-Cube-Gesture / Cube-Backside-Click)
+[Unit]
+Description=Watch KDE's Desktop Cube for updates (cube patches)
+
+[Path]
+PathChanged=/usr/share/kwin/effects/cube/contents/ui/ScreenView.qml
+PathChanged=/usr/share/kwin/effects/cube/contents/ui/Cube.qml
+PathChanged=/usr/share/kwin/effects/cube/contents/ui/main.qml
+Unit=kde-cube-patches-update.service
+
+[Install]
+WantedBy=default.target
+EOF
+  cat > "$UNIT_DIR/kde-cube-patches-update.service" <<'EOF'
+# Installed by kde-cube-patches-sync (3-Finger-Cube-Gesture / Cube-Backside-Click)
+[Unit]
+Description=Rebuild the patched Desktop Cube after a KDE update
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/kde-cube-patches-sync --settle
+EOF
+  cat > "$UNIT_DIR/kde-cube-patches-login.service" <<'EOF'
+# Installed by kde-cube-patches-sync (3-Finger-Cube-Gesture / Cube-Backside-Click)
+[Unit]
+Description=Check the patched Desktop Cube at login
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/kde-cube-patches-sync
+
+[Install]
+WantedBy=default.target
+EOF
+  systemctl --user daemon-reload
+  systemctl --user enable --now kde-cube-patches.path
+  systemctl --user enable kde-cube-patches-login.service
+}
+
+remove_if_unused() {
+  if compgen -G "$PATCH_DIR/*.patch" >/dev/null; then
+    return 1
+  fi
+  systemctl --user disable --now kde-cube-patches.path 2>/dev/null || true
+  systemctl --user disable kde-cube-patches-login.service 2>/dev/null || true
+  rm -f "$UNIT_DIR/kde-cube-patches.path" "$UNIT_DIR/kde-cube-patches-update.service" \
+    "$UNIT_DIR/kde-cube-patches-login.service"
+  systemctl --user daemon-reload 2>/dev/null || true
+  if [[ -f "$MARKER" || -f "$OLD_MARKER" ]]; then
+    rm -rf "$DST"
+    echo "Removed the patched Desktop Cube; KDE's own cube is used after your next login."
+  fi
+  rm -rf "$PATCH_DIR" "$STATE"
+  rm -f "$SELF"
+  return 0
+}
+
+case "${1:-}" in
+  --settle) sleep 10 ;;   # triggered by KDE's cube files changing: let the update finish first
+  --setup) setup ;;
+  # Patches are left: carry on and rebuild without the one that was just removed.
+  --remove-if-unused) remove_if_unused && exit 0 ;;
+esac
+
+notify() { # <urgency> <title> <body>
+  local bus="/run/user/$(id -u)/bus"
+  [[ -S "$bus" ]] || return 0
+  DBUS_SESSION_BUS_ADDRESS="unix:path=$bus" notify-send -a "KDE Desktop Cube" -u "$1" \
+    -i preferences-desktop-effects "$2" "$3" 2>/dev/null || true
+}
+ours() { [[ -f "$MARKER" || -f "$OLD_MARKER" ]]; }
+remove_ours() { ours && rm -rf "$DST"; }
+# A short checksum of all of KDE's cube files, so any change to them (an update) is noticed
+# even before the package database lists the new version. LC_ALL=C keeps the file order, and so
+# the checksum, the same whatever language the session uses.
+fingerprint() { (cd "$SRC" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) | sha256sum | cut -c1-16; }
+# The human-readable name a patch gives itself on a "Name:" line before the diff.
+patch_title() { sed -n 's/^Name: //p;/^--- /q' "$1" | head -1; }
+
+mkdir -p "$STATE"
+[[ -d "$SRC" ]] || exit 0
+kde_version="$(rpm -q --qf '%{VERSION}-%{RELEASE}' kdeplasma-addons 2>/dev/null || echo unknown)"
+
+# The patches to apply: every *.patch in PATCH_DIR, in name order, unless turned off.
+patches=()
+if [[ -d "$PATCH_DIR" ]]; then
+  while IFS= read -r -d '' p; do
+    name="$(basename "$p" .patch)"
+    [[ -e "$CONFIG/$name/disabled" ]] && continue
+    patches+=("$p")
+  done < <(find "$PATCH_DIR" -maxdepth 1 -name '*.patch' -print0 | LC_ALL=C sort -z)
+fi
+if [[ ${#patches[@]} -eq 0 ]]; then
+  remove_ours && echo "No cube patches are turned on; removed the patched cube (KDE's own cube is used)."
+  exit 0
+fi
+
+fp="$(fingerprint)"
+# Everything the patched cube is built from: KDE's cube and the patches. Unchanged -> nothing to do.
+inputs="$( { echo "$fp"; for p in "${patches[@]}"; do basename "$p"; sha256sum < "$p"; done; } | sha256sum | cut -c1-16)"
+if [[ -f "$MARKER" ]] && grep -qx "inputs=$inputs" "$MARKER"; then
+  exit 0
+fi
+
+# Build the new override next to the old one, then swap it in.
+mkdir -p "$(dirname "$DST")"
+tmp="$(mktemp -d "$(dirname "$DST")/.cube-new.XXXXXX")" || exit 1
+cp -r "$SRC/." "$tmp/"
+applied=()
+notified=false
+for p in "${patches[@]}"; do
+  name="$(basename "$p" .patch)"
+  title="$(patch_title "$p")"
+  if (cd "$tmp" && GIT_CEILING_DIRECTORIES="$(dirname "$tmp")" git apply -p1 "$p") 2>/dev/null; then
+    applied+=("$name")
+    rm -f "$STATE/failed-$name"
+  else
+    echo "The ${title:-$name} patch doesn't fit KDE's cube ($kde_version); skipped it."
+    if [[ "$(cat "$STATE/failed-$name" 2>/dev/null)" != "$fp" ]]; then
+      printf '%s\n' "$fp" > "$STATE/failed-$name"
+      notify normal "Cube ${title:-$name} turned off" \
+        "KDE's Desktop Cube changed (kdeplasma-addons $kde_version) and the ${title:-$name} patch no longer fits, so it's turned off until its project is updated. Everything else keeps working; log out and back in to use the updated cube."
+      notified=true
+    fi
+  fi
+done
+
+if [[ ${#applied[@]} -eq 0 ]]; then
+  rm -rf "$tmp"
+  remove_ours && echo "No cube patch fits KDE's cube ($kde_version); removed the patched cube (KDE's own cube is used)."
+  exit 0
+fi
+
+write_marker() { # <dir>
+  printf 'kde=%s\ninputs=%s\napplied=%s\n' "$fp" "$inputs" "${applied[*]}" > "$1/.kde-cube-patches"
+}
+
+if [[ -e "$DST" ]] && ! ours; then
+  # A cube override this script didn't create. Adopt it only if it's exactly what we'd install.
+  if diff -rq --exclude='.kde-cube-patches' --exclude='.cube-backside-click' --exclude='.cube-gesture-override' \
+      "$DST" "$tmp" >/dev/null 2>&1; then
+    rm -f "$DST/.cube-gesture-override"
+    write_marker "$DST"
+    rm -rf "$tmp"
+    echo "Adopted the existing cube override (identical to the patched cube)."
+  else
+    rm -rf "$tmp"
+    echo "Left $DST alone: it's a cube override that wasn't made by these tools."
+  fi
+  exit 0
+fi
+
+previous_kde="$(sed -n 's/^kde=//p' "$MARKER" 2>/dev/null)"
+if [[ -z "$previous_kde" && -f "$OLD_MARKER" ]]; then previous_kde="$(cat "$OLD_MARKER")"; fi
+write_marker "$tmp"
+if [[ -e "$DST" ]]; then
+  mv "$DST" "$DST.old.$$" && mv "$tmp" "$DST" && rm -rf "$DST.old.$$"
+else
+  mv "$tmp" "$DST"
+fi
+echo "Installed the patched cube (kdeplasma-addons $kde_version; patches: ${applied[*]})."
+if [[ -n "$previous_kde" && "$previous_kde" != "$fp" ]] && ! $notified; then
+  notify normal "Desktop Cube patches updated" \
+    "KDE's Desktop Cube was updated (kdeplasma-addons $kde_version) and the patched copy was rebuilt. Log out and back in to use it."
+fi
