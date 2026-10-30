@@ -1,0 +1,61 @@
+--- a/contents/ui/Cube.qml
++++ b/contents/ui/Cube.qml
+@@ -28,6 +28,36 @@
+         return cube.angleTick * (desktop.x11DesktopNumber - 1);
+     }
+ 
++    // Returns the desktop of the nearest face crossed by the ray from rayStart towards rayEnd
++    // (scene coordinates), counting both the front and the back of each face, or null if the ray
++    // misses them all. View3D.pick() only detects front sides, so clicks on the visible back of a
++    // face used to fall through to the desktop in front.
++    function desktopAlongRay(rayStart, rayEnd) {
++        let nearestDesktop = null;
++        let nearestT = Infinity;
++        for (let i = 0; i < faceRepeater.count; i++) {
++            const face = faceRepeater.objectAt(i);
++            // In its own coordinates a face is the 100x100 #Rectangle centered at the origin, z = 0.
++            const a = face.mapPositionFromScene(rayStart);
++            const b = face.mapPositionFromScene(rayEnd);
++            const dz = b.z - a.z;
++            if (Math.abs(dz) < 1e-6) {
++                continue;
++            }
++            const t = -a.z / dz;
++            if (t < 0 || t >= nearestT) {
++                continue;
++            }
++            const x = a.x + (b.x - a.x) * t;
++            const y = a.y + (b.y - a.y) * t;
++            if (Math.abs(x) <= 50 && Math.abs(y) <= 50) {
++                nearestDesktop = face.desktop;
++                nearestT = t;
++            }
++        }
++        return nearestDesktop;
++    }
++
+     Repeater3D {
+         id: faceRepeater
+         model: KWinComponents.VirtualDesktopModel {}
+--- a/contents/ui/ScreenView.qml
++++ b/contents/ui/ScreenView.qml
+@@ -163,9 +163,16 @@
+     MouseArea {
+         anchors.fill: view
+         onClicked: mouse => {
+-            const hitResult = view.pick(mouse.x, mouse.y);
+-            if (hitResult.objectHit) {
+-                root.switchTo(hitResult.objectHit.desktop);
++            // Check both sides of every face (see Cube.desktopAlongRay); view.pick() ignores back sides.
++            // The ray comes from the camera itself: view.mapTo3DScene() needs view.camera to be set,
++            // which the cube leaves to View3D's automatic camera choice.
++            const vx = mouse.x / view.width;
++            const vy = mouse.y / view.height;
++            const rayStart = camera.mapFromViewport(Qt.vector3d(vx, vy, 0));
++            const rayEnd = camera.mapFromViewport(Qt.vector3d(vx, vy, 1000));
++            const desktop = cube.desktopAlongRay(rayStart, rayEnd);
++            if (desktop) {
++                root.switchTo(desktop);
+             } else {
+                 root.switchToSelected();
+             }
